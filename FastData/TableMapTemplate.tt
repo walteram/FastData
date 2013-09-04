@@ -1,0 +1,351 @@
+﻿<#@ template language="C#" #>
+<#@ import namespace="FastData.Configuration" #>
+<#@ import namespace="FastData.Utils" #>
+<#@ import namespace="System.Linq" #>
+<#@ import namespace="System.Text" #>
+<#    
+Type type = this.Type;
+string className = this.ClassName;
+string namespaceName = this.NamespaceName;
+var mappedProperties = FastDataOptions.Instance.TypeInfoLoader.GetMappedProperties(type).Select(it => new { ColumnName = FastDataOptions.Instance.TypeInfoLoader.GetColumnName(it), Property = it }).Where(it => !string.IsNullOrEmpty(it.ColumnName)).ToArray();
+var tableName = FastDataOptions.Instance.TypeInfoLoader.GetTableName(type);
+var primaryKeyName = FastDataOptions.Instance.TypeInfoLoader.GetPrimaryKeyName(type);
+var uniqueKeyNames = FastDataOptions.Instance.TypeInfoLoader.GetUniqueKeyNames(type).Select(it => FastDataOptions.Instance.TypeInfoLoader.GetColumnName(it)).Where(it => !string.IsNullOrEmpty(it)).ToArray();
+var uniqueKeyProperties = FastDataOptions.Instance.TypeInfoLoader.GetUniqueKeyNames(type);
+var uniqueKeyColumnNames = uniqueKeyProperties.Select(it => it.Name).ToArray();
+var uniqueKeyExpression = "";
+for (var i = 0; i < uniqueKeyProperties.Length; i++)
+{
+    if (i > 0)
+    {
+        uniqueKeyExpression += " AND ";
+    }
+    var columnName = FastDataOptions.Instance.TypeInfoLoader.GetColumnName(uniqueKeyProperties[i]);
+    var paramName = FastDataOptions.Instance.ParameterSqlPrefix + columnName;
+    if (FastDataOptions.Instance.TypeInfoLoader.CanBeNull(uniqueKeyProperties[i]))
+    {
+        uniqueKeyExpression += "((" + paramName + " " + FastDataOptions.Instance.IsNullExpression + " AND " + columnName + " " + FastDataOptions.Instance.IsNullExpression + ") OR " + columnName + "=" + paramName + ")";        
+    }
+    else 
+    {
+        uniqueKeyExpression += columnName + "=" + paramName;
+    }                                
+}
+
+var first = true;
+#>
+using System;
+using System.Data.Common;
+using FastData.Configuration;
+using System.Linq;
+
+namespace <#=namespaceName#>
+{
+    public sealed class <#=className#> : TableMap<<#=type.FullName#>>
+    {		
+        public override <#=type.FullName#> CreateObject(DbDataReader dataReader)
+        {
+            var obj = new <#=type.FullName#>();
+            <#
+            foreach (var item in mappedProperties)
+            {
+                if (item.Property.PropertyType.IsGenericType && item.Property.PropertyType.GetGenericTypeDefinition() == typeof(Nullable<>))
+                {
+                    #>
+                    if(dataReader["<#=item.ColumnName#>"] == DBNull.Value || dataReader["<#=item.ColumnName#>"] == null)
+                    {
+                        obj.<#=item.Property.Name#> = null;
+                    }
+                    else
+                    {
+                        obj.<#=item.Property.Name#> = (<#=StringUtils.GetTypeConverter(item.Property.PropertyType.GetGenericArguments()[0])#>(dataReader["<#=item.ColumnName#>"]));
+                    }
+                    <#                    
+                }
+                else if (item.Property.PropertyType == typeof(string))
+                {
+                    #>
+                    if(dataReader["<#=item.ColumnName#>"] == DBNull.Value || dataReader["<#=item.ColumnName#>"] == null)
+                    {
+                        obj.<#=item.Property.Name#> = null;
+                    }
+                    else
+                    {
+                        obj.<#=item.Property.Name#> = (string)dataReader["<#=item.ColumnName#>"];
+                    }
+                    <#                    
+                }
+                else
+                {
+                    #>obj.<#=item.Property.Name#> = (<#=StringUtils.GetTypeConverter(item.Property.PropertyType)#>(dataReader["<#=item.ColumnName#>"]));<#
+                }                
+            }
+            #>
+            return obj;
+        }
+
+        protected override void CreateUpdateCommand(<#=type.FullName#> obj, ref DbCommand command)
+        {
+            command.CommandText = UpdateCommandText;
+            <#
+            foreach (var item in mappedProperties)
+            {
+                if (item.ColumnName == primaryKeyName)
+                {
+                    continue;
+                }
+                #>CreateParameter("<#=item.ColumnName#>", obj.<#=item.Property.Name#>, ref command);<#
+            }
+            #>
+        }
+        
+        protected override void CreateUpdateCommand(<#=type.FullName#> obj, ref DbCommand command, string[] changedProperties, string[] incrementProperties)
+        {
+            command.CommandText = "UPDATE <#=tableName#> SET ";
+            <#
+            foreach (var item in mappedProperties)
+            {
+                if (item.ColumnName == primaryKeyName)
+                {
+                    continue;
+                }
+                #>
+                if(changedProperties != null && changedProperties.Contains("<#=item.Property.Name#>")) command.CommandText += CreateParameter("<#=item.ColumnName#>", obj.<#=item.Property.Name#>, ref command) + ", ";
+                <#
+                if(item.Property.PropertyType != typeof(string) && item.Property.PropertyType != typeof(byte[]))
+                {
+                    #>if(incrementProperties != null && incrementProperties.Contains("<#=item.Property.Name#>")) command.CommandText += "<#=item.ColumnName#>=<#=item.ColumnName#>+1, ";
+            <#
+                }            
+            }
+          #>command.CommandText = command.CommandText.TrimEnd(' ', ',') + " WHERE ";
+        }
+
+        protected override void CreateInsertCommand(<#=type.FullName#> obj, ref DbCommand command)
+        {
+            command.CommandText = InsertCommandText;
+            <#
+            foreach (var item in mappedProperties)
+            {
+                if (item.ColumnName == primaryKeyName)
+                {
+                    continue;
+                }
+                #>CreateParameter("<#=item.ColumnName#>", obj.<#=item.Property.Name#>, ref command);<#
+            }
+            #>
+        }
+
+        public override void CreateTryInsertCommand(<#=type.FullName#> obj, ref DbCommand command)
+        {
+            command.CommandText = TryInsertCommandText;
+            <#
+            foreach (var item in mappedProperties)
+            {
+                if (item.ColumnName == primaryKeyName)
+                {
+                    continue;
+                }
+                #>
+                command.Parameters.Add(CreateParameterWithFullName("<#=FastDataOptions.Instance.ParameterNamePrefix + item.ColumnName#>", obj.<#=item.Property.Name#>, command));<#
+            }
+            #>
+        }
+
+        public override void UpdateTryInsertCommand(<#=type.FullName#> obj, ref DbCommand command)
+        {
+            <#
+            foreach (var item in mappedProperties)
+            {
+                if (item.ColumnName == primaryKeyName)
+                {
+                    continue;
+                }
+                if (FastDataOptions.Instance.TypeInfoLoader.CanBeNull(item.Property))
+                { 
+                    #>if(obj.<#=item.Property.Name#> != null) {command.Parameters["<#=FastDataOptions.Instance.ParameterNamePrefix + item.ColumnName#>"].Value = obj.<#=item.Property.Name#>; } else { command.Parameters["<#=FastDataOptions.Instance.ParameterNamePrefix + item.ColumnName#>"].Value = DBNull.Value; }<#
+                }
+                else
+                {
+                    #>command.Parameters["<#=FastDataOptions.Instance.ParameterNamePrefix + item.ColumnName#>"].Value = obj.<#=item.Property.Name#>;<#           
+                }
+            }
+            #>
+        }
+
+        public override object[] GetUniqueKeyValues(<#=type.FullName#> obj)
+        {
+            return new object[]{
+            <#
+            first = true;
+            foreach (var item in uniqueKeyColumnNames)
+            {
+                if (!first)
+                {
+                    #>, <#                    
+                }
+                #>obj.<#=item#><#
+                first = false;
+            }
+            #>};
+        }
+
+        protected override string SelectCommandText 
+        { 
+            get { return "SELECT <#
+            for (var i = 0; i < mappedProperties.Length; i++)
+            {
+                if (i > 0)
+                {
+                    #>, <#
+                }
+                #><#=mappedProperties[i].ColumnName#><#
+             }
+             #> FROM <#=tableName#>"; }
+        }
+
+		protected override string SelectTopNCommandText 
+        { 			
+            get { return "SELECT {0} <#
+            for (var i = 0; i < mappedProperties.Length; i++)
+            {
+                if (i > 0)
+                {
+                    #>, <#
+                }
+                #><#=mappedProperties[i].ColumnName#><#
+             }
+             #> FROM <#=tableName#> ORDER BY <#=primaryKeyName#> {1}"; }
+        }
+            
+        protected override string UpdateCommandText 
+        { 
+            get { return "UPDATE <#=tableName#> SET <#
+            first = true;
+            foreach(var item in mappedProperties)
+            {
+                if (item.ColumnName == primaryKeyName)
+                {
+                    continue;
+                }
+                if (!first)
+                {
+                    #>, <#
+                }
+                #><#=item.ColumnName + "=" + FastDataOptions.Instance.ParameterSqlPrefix + item.ColumnName#><#
+                first = false;
+            }
+           #> WHERE "; }
+        }
+
+        protected override string DeleteCommandText 
+        {             
+            get { return "DELETE FROM <#=tableName#> WHERE "; }
+        }
+
+		protected override string TruncateCommandText 
+        {             
+            get { return "TRUNCATE TABLE <#=tableName#>"; }
+        }
+    
+        protected override string InsertCommandText
+        { 
+            get { return "<#
+            var insertCommandText = new StringBuilder(512);
+            insertCommandText.Append("INSERT INTO " + tableName + "(");
+            first = true;
+            foreach(var item in mappedProperties)
+            {
+                if (item.ColumnName == primaryKeyName)
+                {
+                    continue;
+                }
+                if (!first)
+                {
+                    insertCommandText.Append(", ");
+                }
+                insertCommandText.Append(item.ColumnName);
+                first = false;
+            }
+            insertCommandText.Append(") VALUES (");
+            first = true;
+            foreach(var item in mappedProperties)
+            {
+                if (item.ColumnName == primaryKeyName)
+                {
+                    continue;
+                }
+                if (!first)
+                {
+                    insertCommandText.Append(", ");
+                }
+                insertCommandText.Append(FastDataOptions.Instance.ParameterSqlPrefix + item.ColumnName);
+                first = false;
+            }
+            insertCommandText.Append(")");
+            #><#=insertCommandText.ToString()#>"; }
+        }
+
+        protected override string TryInsertCommandText
+        { 
+            get { return "<#= FastDataOptions.Instance.BeginTryExpression + " " + insertCommandText.ToString() + "; " + FastDataOptions.Instance.EndTryExpression #>"; }
+        }
+
+        protected override string GetLastIdCommandText
+        { 
+            get { return "SELECT {1} {0} FROM <#=tableName#> ORDER BY {0} DESC {2}"; }
+        }
+
+        protected override string PrimaryKeyName 
+        { 
+            get { return "<#=primaryKeyName#>"; }
+        }
+
+        protected override string SelectFieldCommandText 
+        { 
+            get { return "SELECT {1} {0} FROM <#=tableName#> WHERE <#=uniqueKeyExpression#> {2}"; }
+         }
+
+        protected override string SelectCreationDateCommandText 
+        { 
+            get { return "SELECT <#=FastDataOptions.Instance.GetTop(1)#> <#=FastDataOptions.Instance.TypeInfoLoader.GetCreationDateColumnName(type)#> FROM <#=tableName#> WHERE <#=uniqueKeyExpression#> <#=FastDataOptions.Instance.GetLimit(1)#>"; }
+        }
+
+        protected override string SelectPrimaryKeyCommandText 
+        { 
+            get { return "SELECT <#=FastDataOptions.Instance.GetTop(1)#> <#=primaryKeyName#> FROM <#=tableName#> WHERE <#=uniqueKeyExpression#> <#=FastDataOptions.Instance.GetLimit(1)#>"; }
+         }
+
+        protected override string DetectChangesCommandText 
+        { 
+            get { return "SELECT COUNT(1) FROM <#=tableName#> WHERE <#
+            var changesColumn = FastDataOptions.Instance.TypeInfoLoader.GetChangesDetectionColumnName(type);
+            var changesParam = FastDataOptions.Instance.ParameterSqlPrefix + "ChangesColumnValue";    
+            #><#=changesColumn + ">" + changesParam#>"; }
+        }
+
+        protected override string CountCommandText
+        { 
+            get { return "SELECT COUNT(1) FROM <#=tableName#>"; }
+        }
+
+		protected override string TableName
+        { 
+            get { return "<#=tableName#>"; }
+        }
+                                    
+        protected override string[] UniqueKeyNames 
+        { 
+            get { return new string[] { <#            
+            for (var i = 0; i < uniqueKeyNames.Length; i++)
+            {
+                if (i > 0)
+                {
+                    #>, <#
+                }				
+                #><#="\"" + uniqueKeyNames[i] + "\""#><#
+            }
+            #>}; }
+        }
+    }
+}
